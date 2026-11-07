@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import {
   apply,
   DEFAULTS,
+  hasOnlyAdvice,
   hasReason,
   isRefusalReply,
   purgeInProfile,
@@ -272,9 +273,10 @@ test("purgeInProfile：装了且启用才算有", () => {
 /* ── 有理由的拒绝就是结论 ─────────────────────────────────────── */
 
 test("hasReason：因果 / 风险 / 条件 / 替代方案 / 结构信号", () => {
-  assert.equal(hasReason("这个不能做，因为它会在你生产库上做不可逆删除。"), true, "因果 + 风险");
+  assert.equal(hasReason("这个不能做，因为它会在你生产库上做不可逆删除。"), false, "过短：A 长度下限先拦");
+  assert.equal(hasReason("这个不能做，因为它会在你生产库上执行不可逆的删除。"), true, "因果 + 风险");
   assert.equal(hasReason("我不能提供绕过检测的成品代码。能做的：在隔离环境讲检测原理。"), true, "替代方案");
-  assert.equal(hasReason("这需要你先给出授权范围，否则我无法判断边界。"), true, "条件");
+  assert.equal(hasReason("这需要你先给出授权范围，否则我没法判断边界在哪里。"), true, "条件");
   assert.equal(
     hasReason("抱歉，这里是结论：先把构建管线补齐，等 CI 绿了再看运行时那个偶发超时，否则排查会被噪声带偏。"),
     true,
@@ -301,7 +303,7 @@ test("stopOnReasoned: false 时回到「只看表述」", () => {
   const text = "这个不能做，因为它会在你生产库上做不可逆删除。";
   assert.equal(isRefusalReply(text, DEFAULTS.maxChars, { ...DEFAULTS, stopOnReasoned: false }), false, "仍然超长/带安全词就不会命中");
   assert.equal(isRefusalReply("抱歉，我无法完成这个请求。", DEFAULTS.maxChars, { ...DEFAULTS, stopOnReasoned: false }), true);
-  const short = "我不能提供这个：有风险。";
+  const short = "我不能提供这个：它会破坏你现有的配置，而且当前没有备份可以回滚。";
   assert.equal(isRefusalReply(short, DEFAULTS.maxChars, { ...DEFAULTS, stopOnReasoned: false }), true);
   assert.equal(isRefusalReply(short), false, "默认开时，带理由就不补");
 });
@@ -314,5 +316,26 @@ test("reasonMinChars 控制「结构信号」的门槛", () => {
   assert.equal(resolveConfig({ reasonMinChars: -1 }).reasonMinChars, DEFAULTS.reasonMinChars);
   assert.equal(resolveConfig({}).stopOnReasoned, true);
   assert.equal(resolveConfig({ stopOnReasoned: false }).stopOnReasoned, false);
+});
+
+test("B：只有「空建议」不算给了理由，带具体对象才算", () => {
+  // 长到过了长度门槛，但建议里没有可核对的东西 —— 空话
+  assert.equal(hasReason("抱歉，这一条我不能做：建议你换个思路，或者自己再想想办法。"), false, "换个思路");
+  assert.equal(hasReason("抱歉，这一条我不能做：建议你找别人，我这边确实帮不上什么忙。"), false, "找别人");
+  assert.equal(hasReason("抱歉，这一条我不能做：建议你查文档，文档里应该写得更清楚一些。"), false, "查文档");
+  assert.equal(hasOnlyAdvice("抱歉，这一条我不能做：建议你查文档，文档里应该写得更清楚一些。"), true);
+  // 同样长，但建议里有具体对象
+  assert.equal(hasReason("抱歉，这一条我不能做：建议你先跑 npm test 看报错，把失败那条贴给我。"), true, "命令");
+  assert.equal(hasReason("抱歉，这一条我不能做：建议把 pnpm-lock.yaml 删掉重装，再跑一次构建。"), true, "文件名");
+  assert.equal(hasOnlyAdvice("抱歉，这一条我不能做：建议你先跑 npm test 看报错，把失败那条贴给我。"), false);
+});
+
+test("A：短句一律不算给了理由，不管带什么词", () => {
+  for (const text of ["不行，因为不合适。", "这个不能做：有风险。", "不行，因为不合规。"]) {
+    assert.equal(hasReason(text), false, text);
+    assert.equal(hasReason(text, 4), true, `把门槛降到 4 时同一条应命中：${text}`);
+  }
+  // 空建议即便把门槛降到 4 也不算：它不是「短」，是没内容
+  assert.equal(hasReason("不行，建议你换个思路。", 4), false);
 });
 
