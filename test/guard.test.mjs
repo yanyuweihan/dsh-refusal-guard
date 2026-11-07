@@ -1,11 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { apply, DEFAULTS, isRefusalReply, resolveConfig, stopReason } from "../lib/index.js";
+import {
+  apply,
+  DEFAULTS,
+  hasReason,
+  isRefusalReply,
+  purgeInProfile,
+  resolveConfig,
+  stopReason,
+} from "../lib/index.js";
 
 function mockCtx() {
   const sections = [];
@@ -154,5 +163,156 @@ test("宿主缺 API 时给一句明确的告警，而不是静默失效", () => 
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /ctx\.on/);
   assert.match(warnings[0], /DSH/);
+});
+
+function gatedCtx(services) {
+  const handlers = new Map();
+  const ctx = {
+    get(service) {
+      if (services && Object.prototype.hasOwnProperty.call(services, service)) return services[service];
+      return null;
+    },
+    on(event, handler) {
+      handlers.set(event, handler);
+      return () => handlers.delete(event);
+    },
+    effect(factory) {
+      factory();
+      return () => {};
+    },
+    logger() {},
+  };
+  return { ctx, handlers };
+}
+
+/** 屏蔽真实 profile 的回落探测，否则跑测试的这台机器上确实装了 dsh-purge。 */
+function withClearedProfile(fn) {
+  const saved = process.env.DSH_PROFILE_DIR;
+  delete process.env.DSH_PROFILE_DIR;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PROFILE_DIR;
+    else process.env.DSH_PROFILE_DIR = saved;
+  }
+}
+
+test("requirePurge 关着时不做任何探测，照常注册", () => {
+  const { ctx, handlers } = gatedCtx({});
+  const dispose = apply(ctx, { requirePurge: false });
+  assert.equal(handlers.has("agent/status"), true);
+  dispose();
+  assert.equal(handlers.size, 0);
+});
+
+test("requirePurge 打开但没有 dsh-purge：不注册监听器，并明确说一次", () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  let dispose;
+  try {
+    withClearedProfile(() => {
+      const { ctx, handlers } = gatedCtx({});
+      dispose = apply(ctx, { requirePurge: true });
+      assert.equal(handlers.size, 0, "一个监听器都不该挂");
+    });
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(dispose, undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /dsh-purge/);
+  assert.match(warnings[0], /不生效/);
+});
+
+test("requirePurge 打开且 dsh-purge 在：照常注册", () => {
+  const { ctx, handlers } = gatedCtx({ redteam: { ok: true } });
+  const dispose = apply(ctx, { requirePurge: true });
+  assert.equal(handlers.has("agent/status"), true);
+  dispose();
+  assert.equal(handlers.size, 0);
+});
+
+test("requirePurge 只认严格 true，字符串不会把它打开", () => {
+  const { ctx, handlers } = gatedCtx({});
+  const dispose = apply(ctx, { requirePurge: "true" });
+  assert.equal(handlers.has("agent/status"), true, '"true" 应该被当成关');
+  assert.equal(resolveConfig({ requirePurge: "true" }).requirePurge, false);
+  dispose();
+});
+
+test("purgeInProfile：装了且启用才算有", () => {
+  const dir = mkdtempSync(join(tmpdir(), "guard-profile-"));
+  const file = join(dir, "package.json");
+
+  writeFileSync(file, JSON.stringify({ dependencies: {} }));
+  assert.equal(purgeInProfile(file), false, "没装");
+
+  writeFileSync(
+    file,
+    JSON.stringify({ dependencies: { "dsh-purge": "1.0.0" }, dsh: { profile: { bundles: [] } } }),
+  );
+  assert.equal(purgeInProfile(file), false, "装了但被 disable（bundles 里没有）");
+
+  writeFileSync(
+    file,
+    JSON.stringify({
+      dependencies: { "dsh-purge": "1.0.0" },
+      dsh: { profile: { bundles: ["dsh-purge"] } },
+    }),
+  );
+  assert.equal(purgeInProfile(file), true, "装了且启用");
+
+  writeFileSync(file, "{ 这不是 JSON");
+  assert.equal(purgeInProfile(file), false, "坏 JSON 当没有");
+
+  assert.equal(purgeInProfile(join(dir, "missing.json")), false, "文件不存在当没有");
+});
+
+/* ── 有理由的拒绝就是结论 ─────────────────────────────────────── */
+
+test("hasReason：因果 / 风险 / 条件 / 替代方案 / 结构信号", () => {
+  assert.equal(hasReason("这个不能做，因为它会在你生产库上做不可逆删除。"), true, "因果 + 风险");
+  assert.equal(hasReason("我不能提供绕过检测的成品代码。能做的：在隔离环境讲检测原理。"), true, "替代方案");
+  assert.equal(hasReason("这需要你先给出授权范围，否则我无法判断边界。"), true, "条件");
+  assert.equal(
+    hasReason("抱歉，这里是结论：先把构建管线补齐，等 CI 绿了再看运行时那个偶发超时，否则排查会被噪声带偏。"),
+    true,
+    "结构：够长 + 冒号说明",
+  );
+  assert.equal(hasReason("我不能提供这个。原因是有法律风险，我可以给你替代思路。"), true);
+  assert.equal(hasReason("我不能提供这类内容。"), false, "光给结论、没给理由");
+  assert.equal(hasReason("抱歉，我无法完成这个请求。"), false);
+});
+
+test("带理由的拒绝不补轮，且停因标为 reasoned", () => {
+  const text = "我不能提供绕过检测的成品代码。能做的：在隔离环境讲清检测原理与固件校验逻辑。";
+  assert.equal(stopReason(text), "reasoned");
+  assert.equal(isRefusalReply(text), false);
+});
+
+test("短且无理由的拒绝照旧补轮", () => {
+  const text = "我不能提供这类内容。";
+  assert.equal(stopReason(text), null);
+  assert.equal(isRefusalReply(text), true);
+});
+
+test("stopOnReasoned: false 时回到「只看表述」", () => {
+  const text = "这个不能做，因为它会在你生产库上做不可逆删除。";
+  assert.equal(isRefusalReply(text, DEFAULTS.maxChars, { ...DEFAULTS, stopOnReasoned: false }), false, "仍然超长/带安全词就不会命中");
+  assert.equal(isRefusalReply("抱歉，我无法完成这个请求。", DEFAULTS.maxChars, { ...DEFAULTS, stopOnReasoned: false }), true);
+  const short = "我不能提供这个：有风险。";
+  assert.equal(isRefusalReply(short, DEFAULTS.maxChars, { ...DEFAULTS, stopOnReasoned: false }), true);
+  assert.equal(isRefusalReply(short), false, "默认开时，带理由就不补");
+});
+
+test("reasonMinChars 控制「结构信号」的门槛", () => {
+  const short = "不行：太短。";
+  assert.equal(hasReason(short, 40), false, "短句不能只靠冒号算理由");
+  assert.equal(hasReason(short, 5), true);
+  assert.equal(resolveConfig({}).reasonMinChars, DEFAULTS.reasonMinChars);
+  assert.equal(resolveConfig({ reasonMinChars: -1 }).reasonMinChars, DEFAULTS.reasonMinChars);
+  assert.equal(resolveConfig({}).stopOnReasoned, true);
+  assert.equal(resolveConfig({ stopOnReasoned: false }).stopOnReasoned, false);
 });
 

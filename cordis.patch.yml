@@ -17,3 +17,6 @@
         maxChars: 220
         # 等宿主彻底 idle 再补，避免和用户下一条消息竞态
         delayMs: 280
+        # 搭配开关：true = 只有本机装了/启用了 dsh-purge 才工作；没有则已装载但一个监听器都不挂。
+        # 默认 false（不改行为）。这是分发策略，不是功能依赖——本插件判定只读会话日志。
+        requirePurge: false
