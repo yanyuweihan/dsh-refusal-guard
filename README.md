@@ -149,6 +149,10 @@
 下限调高更严（更容易补轮），调低更宽。**注意**：24 是我权衡的结果——真实理由往往 30 字上下，
 卡在 40 会把「建议你先跑 npm test 看报错」这种也推回补轮；要更严格自己改成 40。
 
+> **版本差别（免得看版本记录时困惑）**：`reasonMinChars` 在 **v1.2.0 里默认是 40**，
+> **v1.2.1 起改为 24**，并新增「建议必须带具体对象」这一道闸，所以真正生效的默认值以
+> 代码里的 `DEFAULTS.reasonMinChars` 为准（当前 **24**）。
+
 命中后插件**什么都不做**：结论就是结论，不该被「再试一遍」覆盖。语料见
 `test/corpus.mjs`（56 条：真拒绝必须命中；诊断、安全判断、有理由的拒绝必须不命中），跑
 `node test/run.mjs ./lib/index.js`。
@@ -224,7 +228,7 @@
   「一句话加个建议就能免于补轮」的绕行通道。
 - v1.2.0：新增「有理由的拒绝也是结论」——`hasReason()` 认因果 / 风险 / 条件 / 涉及面 / 替代方案与
   结构信号，`stopReason()` 多出 `reasoned` 一档（顺序 `diagnostic → safety → reasoned`）；两个开关
-  `stopOnReasoned`（默认开）与 `reasonMinChars`（默认 40）。
+  `stopOnReasoned`（默认开）与 `reasonMinChars`（v1.2.0 里默认 **40**，v1.2.1 起改为 **24**）。
 - v1.1.0：新增 `requirePurge` 搭配开关（默认关）。判两层（服务 + profile 清单），缺 purge 时
   一个监听器都不挂、明确记一行日志；`purgeInProfile()` 导出供测试。
 - v1.0.7：可发布版本。去掉 `private`（否则别人装不上）；`peerDependencies` 从
