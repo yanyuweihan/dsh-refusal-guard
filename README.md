@@ -1,202 +1,124 @@
 # dsh-refusal-guard
 
-> DSH（DeepSeek Harness）插件：兜住模型「本来在做事，却回一句『不行 / 我做不了』就收摊」的短路行为，补一条执行轮 —— 但**事实诊断与安全拒绝一律不碰**。
+兜住「短 + 否定式开场」的回复，并自动补一条执行轮。
 
-- 版本：**1.0.6** ｜ 许可证：MIT ｜ 宿主：DeepSeek Harness Desktop（`@deepseek-ai/dsh-desktop` 0.2.2+）
-- 不改宿主源码，只监听 `agent/status` 事件，必要时追加一条 `followup` 消息
-- 关掉插件即恢复原状，无残留状态
+## 为什么存在
 
----
+这类回复是**生成时的短路分支**，读的是词不是意图。实测把推理档位拉到 `max` 也压不住，
+提示词规则只能降概率。唯一稳的办法是「生成后兜住」，所以本插件：
 
-## 一、它解决的是哪一类问题
+- **不碰 `prompt-inject.md`**（那个文件由 `dsh-purge` 的加密槽重建，改了会被覆盖）
+- **不改宿主源码**（不改 `app.asar` 里的官方代码）
+- **不往 system prompt 挂任何东西**（不注入章节，纯监听）
+- 只监听 `agent/status`，在回合已结束且内容可疑时补一条 followup
 
-### 症状
+## 触发条件（必须同时成立）
 
-模型有时候并不是「不肯做」，而是**误读了请求性质**，然后回一句很短的话就结束回合：
+1. `agent/status === "idle"`
+2. 本轮 `turn/end` 不是 `error` / `aborted` / `interrupted` / `max-tokens`
+3. 本轮之后没有新的真人消息
+4. 最后一条 `assistant/message` 的可见文本 ≤ `maxChars`、以否定式起手，**且没有命中事实诊断 /
+   安全判断标记**
+5. 本回合剩余次数 > 0
 
-```
-不行，这是严令禁止的。
-抱歉，我不能完成这个请求。
-无法处理。
-```
+## 什么不算拒绝（关键）
 
-但同一段对话里，换个说法它就会照做 —— 说明瓶颈不在能力，在这句话被生成的瞬间走了否定分支。
+否定式开场既是拒绝的起手，也是报错的起手。真正的诊断一定带症状，所以文本里出现下面任一
+类标记时**不补执行轮**（`isRefusalReply` 直接返回 false）：
 
-### 为什么不能简单「看到短否定就催一遍」
+| 类别 | 例子 |
+|---|---|
+| 文件 / 路径 | `文件不存在`、`未找到 C:\a.md`、`ENOENT`、`no such file` |
+| 权限 | `权限不足`、`没有…权限`、`拒绝访问`、`只读`、`Permission denied`、`401/403` |
+| 网络 | `连接失败`、`拒绝连接`、`请求超时`、`解析失败`、`ECONNREFUSED`、`NXDOMAIN` |
+| 端口 / 资源 | `端口已被占用`、`EADDRINUSE`、`磁盘空间不足` |
+| 进程 / 退出码 | `进程已退出`、`exit code 1` |
+| 命令 / 工具 | `命令未找到`、`没有安装`、`command not found` |
+| 构建 / 解析 | `构建失败`、`SyntaxError`、`Unexpected token`、`JSON 解析失败` |
+| 参数缺失 | `缺少 target 参数`、`需要你提供…` |
+| 记录为空 | `日志里没有…`、`历史记录查不到…` |
 
-因为**短否定句至少混着四种完全不同的语义**，只有第一种该催：
+命中后插件**什么都不做**：结论就是结论，不该被「再试一遍」覆盖。语料见
+`test/corpus.mjs`（56 条：真拒绝必须命中；诊断、安全判断必须不命中），跑
+`node test/run.mjs ./lib/index.js`。
 
-| 语义 | 例子 | 正确处理 |
+## 安全判断也不补轮
+
+否定式开场不只属于「拒绝」和「报错」，还属于正当的安全结论：
+
+| 类别 | 例子 | `stopReason` |
 |---|---|---|
-| ① 误判了请求性质 | 「不行，这是严令禁止的。」（其实只是普通文件操作） | **补一条执行轮** |
-| ② 事实诊断（工具/环境报错） | 「文件不存在。」「Permission denied (os error 13)」「EADDRINUSE」 | 不催，说清缺什么 |
-| ③ 安全 / 合规 / 隐私 / 授权判断 | 「涉及他人账号数据，我不能提供。」 | **保持拒绝**，催等于拿压力逼它改口 |
-| ④ 正在等你确认某个高风险动作 | 「要删 200 个文件，确认吗？」 | 停住等你 |
+| 安全 / 合规 / 隐私 / 授权 | `抱歉，出于安全考虑我不能执行。`、`涉及他人隐私，我不能提供。`、`未授权`、`违法` | `safety` |
 
-早期版本（1.0.0/1.0.1）只做「短 + 否定开场」的形态判断，结果是②③④都被当成①，**43/43 语料是"带病通过"**——语料自己把「安全拒绝也该催」写成了预期。1.0.2 起加诊断层，1.0.3 起加安全层，才算把这个语义分类补齐。
+把这类补成执行轮等于把安全判断掀掉——模型刚给出结论，280ms 后就收到「你只是误判了，
+直接执行」。所以 `isRefusalReply` 会先过 `stopReason()`，顺序 `diagnostic → safety`，
+命中即静默。
 
----
+## 补发指令的边界
 
-## 二、触发链路：七道闸，全过才动
+`retryText` 只在「误判请求性质、压根没动手」时把人推回执行轨道；后面两个分支必须原地停住：
 
-入口在 `lib/index.js` 的 `listen("agent/status", ...)`，并且刻意 `setTimeout(..., cfg.delayMs)`（默认 280ms）等宿主彻底 idle，避免和「用户刚发的新消息」抢跑。
+1. 误判请求性质、还没执行 → 执行并给结论；
+2. 出于安全 / 合规 / 隐私 / 授权的判断 → 保留原结论，不改口执行；
+3. 因文件不存在、工具报错、权限受限、信息不足而停下 → 说明缺什么，**禁止编造**文件内容、
+   命令输出、日志或运行状态，也禁止用 `[PLACEHOLDER]` 代替必要事实。
 
-| # | 闸门 | 实现 | 挡掉什么 |
-|---|---|---|---|
-| 1 | 总开关 | `cfg.maxPerTurn >= 1` | `enabled:false` |
-| 2 | 回合额度 | `if (cur.count >= cfg.maxPerTurn) return false` | 同一回合反复催（默认最多 2 次） |
-| 3 | 宿主状态 | `agent.status === "running" \|\| inboxBusy(agent)` | 还在跑 / 收件箱有活 |
-| 4 | 回合结束原因 | `isAbnormal(reason) \|\| isUserAbort(reason)` | `error` / `aborted` / `interrupted` / `max-tokens`；**你自己按的中断**也不催 |
-| 5 | 有无新真人消息 | 扫 `user/message` 与 `inbox` | 你已经接着说话了 |
-| 6 | 长度 | `s.length > maxChars` → `false` | 长回答说明它在正常干活（默认 220 字） |
-| 7 | 三层判定 | 见下节 | 诊断 / 安全 / 不像拒绝 |
-
-第 4 道闸有个细节：`aborted` 还要再区分「谁中断的」——用户主动按中断不算异常，但也不该被催（`isUserAbort`）。
-
----
-
-## 三、判定：先排除「该停的」，再看「像不像拒绝」
-
-```js
-export function isRefusalReply(text, maxChars = DEFAULTS.maxChars) {
-  const s = ...;                                  // 压空白、取纯文本
-  if (!s) return false;
-  if (s.length > maxChars) return false;          // 太长不判
-  if (stopReason(s) !== null) return false;       // ← 关键：先排除该停的
-  return REFUSAL_OPENERS.some((re) => re.test(s));
-}
-
-export function stopReason(text) {
-  if (DIAGNOSTIC_MARKERS.some((re) => re.test(s))) return "diagnostic";
-  if (SAFETY_MARKERS.some((re) => re.test(s))) return "safety";
-  return null;
-}
-```
-
-**`REFUSAL_OPENERS`** 允许主语前缀，避免「我不能提供这类内容」被开头那个「我」挡掉：
-
-```js
-/^(?:我|本人|我们)?(?:这边|这里)?\s*(?:不行|不可以|不能|没法|无法|不提供|不协助|不予|拒绝|做不到)/
-```
-
-**`DIAGNOSTIC_MARKERS`**（13 组，节选）：文件/路径不存在、权限拒绝、连接超时/不可达、端口占用、进程退出码、命令未安装、构建或语法错误、参数缺失、日志里没有、`403/404/500/502/503`、空文件/0 字节/已被占用、不在授权范围。
-
-**`SAFETY_MARKERS`**（1 组，节选）：安全、合规、违法、违规、隐私、个人信息、他人账号、未授权、未获授权、绕过授权、政策。
-
-顺序不能反：安全类必须**先于**诊断判，否则「出于安全考虑我无法连接该目标」会被当成网络诊断放行。
-
----
-
-## 四、补的时候说什么：四分支，不是一句「继续」
-
-`retryText` 是条件式的，让模型自己按上一轮的真实原因分流：
-
-1. 只是误判请求性质、还没执行 → **直接执行**，给出结论与可执行步骤；
-2. 正在等用户确认高风险动作 → **什么都别做，停住**；
-3. 上一轮出于安全 / 合规 / 隐私 / 授权而停 → **保留原结论，不要改口执行**；
-4. 因文件 / 工具 / 权限 / 信息不足而停 → 只说明缺什么，别改无关文件。
-
-末段还有一条硬约束：**任何情况下不许编造**文件内容、命令输出、日志或运行状态，也不许用 `[PLACEHOLDER]` 顶替必要事实 —— 防的是「为了不显得停下而编」。
-
----
-
-## 五、配置
-
-`cordis.patch.yml` 的 `config`（或插件页设置）：
+## 配置（`cordis.patch.yml` 或插件页）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 总开关 |
-| `maxPerTurn` | `2` | 每回合最多补几次，防死循环；`0` 等于关掉 |
-| `maxChars` | `220` | 超过这个长度的回复一律不判 |
-| `delayMs` | `280` | 等宿主彻底 idle 再动作，避免竞态 |
-| `retryText` | 见 `lib/index.js` | **不建议在 patch 里覆盖**，否则会静默盖掉代码里的默认值 |
+| `maxPerTurn` | `2` | 每回合最多补几次，防死循环 |
+| `maxChars` | `220` | 超过这个长度的回复一律不判，避免误伤 |
+| `delayMs` | `280` | 等宿主彻底 idle 再补，避免竞态 |
+| `retryText` | 见 `lib/index.js` | 补发的那句话。**patch 里不要再写**，否则会静默覆盖代码默认值（v1.0.2 就是这么失效的）；测试会解析真实 patch 检查这一点 |
 
----
+## 版本记录
 
-## 六、安装
+- v1.0.7：可发布版本。去掉 `private`（否则别人装不上）；`peerDependencies` 从
+  `"@deepseek-ai/cordis": "*"` 收成 `^4.1.0` 并标 `optional`（插件并不 import 它，
+  它只是宿主运行时）；新增 `engines.dsh`；宿主缺 API 时改为**明确告警**而不是静默失效。
+- v1.0.5：改简介。`package.json` 的 `description` 去掉「等确认 / 另挂二次确认」的旧说法，
+  新增 `locale/{zh,en}.json` 的 `meta`（插件页标题「拒绝兜底」/ Refusal Guard），
+  在 `exports` / `files` 里登记 `locale` 与 `icon`。
+- v1.0.4：移除「高风险动作二次确认」—— 不再往 system prompt 挂规则，`RISK_RULES` /
+  `mountRiskPrompt()` / `riskPrompt` / `riskOrder` / `riskSection` 与「正在等确认」分类一并删除。
+- v1.0.3：加安全判断排除、`stopReason()`、patch 回归测试。
+- v1.0.2：加事实诊断排除（`DIAGNOSTIC_MARKERS`）。
 
-### A. 本地 link（开发用）
+## 运行要求（给装的人看）
 
-```bash
-# 把仓库放到任意目录，然后在 profile 里 link
-cd ~/.dsh/profiles/desktop
-# package.json: "dsh-refusal-guard": "link:D:/path/to/dsh-refusal-guard"
-# 再把包名加进 dsh.profile.bundles
-```
+| 项 | 值 | 为什么 |
+|---|---|---|
+| DSH | `engines.dsh`: `>=0.2.0 <0.2.2 \|\| >=0.2.2-0` | 0.2.x 才有 `agent/status` 事件与 `agent.followup`；`-0` 那一段是为了让 `0.2.2-rc.1` 这类预发布也算满足 |
+| Node | `^22.19.0 \|\| >=24.0.0` | 用的是内置 `node:crypto` 的 `randomUUID` |
+| cordis | peer `^4.1.0`，`optional: true` | 插件不 import cordis，它只是运行时容器；标 optional 免得装的时候报缺依赖 |
+| 包可见性 | 无 `private` 字段 | 有 `private` 的话 `npm i <github 仓库>` 会被拒 |
 
-### B. 从本仓库装（单插件仓库，根目录就是包，不带 `#path:`）
-
-```bash
-dsh plugin --profile desktop add "git+https://github.com/yanyuweihan/dsh-refusal-guard.git"
-```
-
-> 注意：`dsh plugin` 只转发给 pnpm，**不会**替你登记 `dsh.profile.bundles`；装完要把 `dsh-refusal-guard` 加进 profile 的 bundles，或者直接在 GUI 插件页装。装完必须**完全退出并重开 DSH** 才加载。
-
----
-
-## 七、测试
-
-```bash
-# 语料：56 条（16 条真拒绝 + 诊断/安全/等确认/正常长文等负例）
-node test/run.mjs ./lib/index.js
-# 预期：语料 56 条，通过 56，失败 0
-
-# 单测：7 条（章节注册、包名稳定、判定边界等）
-node --test test/guard.test.mjs
-# 预期：tests 7 / pass 7 / fail 0
-```
-
-语料是**规格**：改动判定逻辑必须先改语料，否则等于偷偷改行为。语料里每一条都带 `expect` 与 `tag`（`refusal` / `diagnostic` / `safety` / `confirm` / `normal`），改错了会直接红。
-
----
-
-## 八、边界与已知局限
-
-1. **只看最后一条 assistant 的可见文本**（reasoning 与 tool-call 都丢弃）。它看不见前文，所以判定必然比模型自己读上下文粗 —— 这是设计边界，不是 bug。
-2. **概率性纠偏，不是保证**。短句 + 高关键词密度最容易误触；长句里夹一句拒绝基本抓不到。
-3. **词形触发**：它读的是词，不是意图。「我误读了」与「我不干」字面同形，只能靠诊断/安全两层把后者剔出去。
-4. 观察记录：同一会话里前文满是拒绝/合规/安全词时，后续更容易被拦 —— 上下文警惕惯性。插件看不见上下文，因此这个因素它帮不上忙。
-5. 它是**后处理层**，不是权限系统：拦不住模型无视整段规则自作主张，那要靠工具调用前的前置闸。
-
----
-
-## 九、目录结构
+版本对不上时不会静默失效，宿主日志里会出现明确一行：
 
 ```
-dsh-refusal-guard/
-├── package.json          # name/main/dsh.bundle/exports/files
-├── cordis.patch.yml      # bundle 补丁：insert id/name/config
-├── icon.svg
-├── locale/
-│   ├── zh.json           # meta.title / meta.description
-│   └── en.json
-├── lib/index.js          # 全部逻辑（约 340 行）
-└── test/
-    ├── corpus.mjs        # 56 条语料（规格）
-    ├── run.mjs           # 跑语料，退出码非 0 即未达标
-    └── guard.test.mjs    # 7 条单测
+[refusal-guard] 宿主缺少 ctx.on / ctx.get，插件不会生效。dsh-refusal-guard 需要 DSH >= 0.2.0（cordis 4.x）。
+[refusal-guard] 宿主没有 agent.followup，无法补发指令（DSH 版本过旧），插件不会生效。
+[refusal-guard] 宿主没有 ctx.effect：热重载时监听可能残留，建议升级 DSH >= 0.2.0。
 ```
 
----
+## 安装
 
-## 十、版本历史
+从 GitHub 直接装：
 
-| 版本 | 变更 |
-|---|---|
-| 1.0.0 | 首版：`agent/status` + 短否定开场判定；语料 31 条，实测 11/31（19 条诊断被误判） |
-| 1.0.1 | 修 `source.kind`：写裸 `"plugin"` 会被 v4 会话格式拒（`format v4 message requires a producer-owned source kind`），改为 `plugin:dsh-refusal-guard` |
-| 1.0.2 | 加 `DIAGNOSTIC_MARKERS`（13 组）+ 条件式 `retryText`；`REFUSAL_OPENERS` 允许主语前缀；语料 43 条 → 43/43 |
-| 1.0.3 | 加 `SAFETY_MARKERS` + `stopReason()` 返回 `"diagnostic"\|"safety"\|null`，安全拒绝不再被催；语料 57 条 |
-| 1.0.4 | 移除与 `dsh-risk-confirm` 重复的高风险提示词章节（职责分离）；语料 56 条 |
-| 1.0.5 | `description` 与语料文案对齐 |
-| 1.0.6 | 加 `locale/{zh,en}.json`，`exports`/`files` 登记 locale 与 icon；插件页显示中文名与简介 |
+```
+plugin_manager install_bundle  →  在插件页「添加插件」里填 github:<你的用户名>/dsh-refusal-guard
+```
 
----
+本地开发也可以 `link:` 挂进 `profiles/desktop`，并登记进 `dsh.profile.bundles`：
 
-## 十一、实现细节备忘（踩过的坑）
+```
+profiles/desktop/package.json
+  dependencies:  "dsh-refusal-guard": "link:<本目录绝对路径>"
+  dsh.profile.bundles: [ ..., "dsh-refusal-guard" ]
+```
 
-- **`source.kind` 必须合法**：`agent.followup()` 造的消息会进 v4 会话格式，`producerKind` 只接受注册过的 producer 或 `plugin:<name>` 形态；否则整轮报错、界面显示「处理失败」。
-- **不要靠 `agent.status` 立刻动作**：宿主在 idle 与「真正可追加」之间有一段窗口，`delayMs` 就是给这段用的。
-- **判定顺序**：长度 → 诊断 → 安全 → opener。任何一层顺序反了都会引入一类误判（早期就是安全层缺失导致「正当拒绝被催」）。
-- **语料即规格**：先写 `expect`，再改判定；否则修一个洞会开两个洞。
+注意：**条目必须由 bundle patch 的 `insert` 创建**，不要再在用户层 `cordis.patch.yml`
+里手写一遍，否则同一个 id 会 `already queued`。
+

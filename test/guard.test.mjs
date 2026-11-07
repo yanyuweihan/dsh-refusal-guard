@@ -118,3 +118,41 @@ test("resolveConfig 仍允许显式覆盖", () => {
   assert.equal(cfg.retryText, "自定义");
   assert.equal(resolveConfig({ retryText: "   " }).retryText, DEFAULTS.retryText);
 });
+
+test("别人能装：manifest 不带 private，且版本约束不是通配", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8"));
+
+  assert.equal(pkg.private, undefined, "private 会让别人装不上");
+
+  const dshRange = pkg.engines?.dsh;
+  assert.equal(typeof dshRange, "string", "engines.dsh 必须写明支持的 DSH 版本");
+  assert.notEqual(dshRange.trim(), "*", "engines.dsh 不能用通配");
+  assert.match(dshRange, /\d+\.\d+/, "engines.dsh 至少要写成版本号");
+
+  const peer = pkg.peerDependencies?.["@deepseek-ai/cordis"];
+  if (peer !== undefined) {
+    assert.notEqual(peer.trim(), "*", "peerDependencies 不能用 *");
+    assert.match(peer, /\d+\.\d+/, "peerDependencies 要写具体版本线");
+    assert.equal(
+      pkg.peerDependenciesMeta?.["@deepseek-ai/cordis"]?.optional,
+      true,
+      "cordis 只是宿主运行时，peer 必须标 optional，否则装着要报缺依赖",
+    );
+  }
+});
+
+test("宿主缺 API 时给一句明确的告警，而不是静默失效", () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    apply({}, {});
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /ctx\.on/);
+  assert.match(warnings[0], /DSH/);
+});
+

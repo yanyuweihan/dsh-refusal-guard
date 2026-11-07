@@ -1,7 +1,6 @@
 {
   "name": "dsh-refusal-guard",
-  "version": "1.0.6",
-  "private": true,
+  "version": "1.0.7",
   "type": "module",
   "description": "兜住「短 + 否定式开场」的短路回复并补一条执行轮；事实诊断与安全判断不补。",
   "icon": "./icon.svg",
@@ -34,9 +33,15 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*"
+    "@deepseek-ai/cordis": "^4.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0 <0.2.2 || >=0.2.2-0"
   }
 }
