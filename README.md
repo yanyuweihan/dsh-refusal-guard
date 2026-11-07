@@ -90,17 +90,17 @@
 
 | 项 | 值 | 为什么 |
 |---|---|---|
-| DSH | `engines.dsh`: `>=0.2.0 <0.2.2 \|\| >=0.2.2-0` | 0.2.x 才有 `agent/status` 事件与 `agent.followup`；`-0` 那一段是为了让 `0.2.2-rc.1` 这类预发布也算满足 |
-| Node | `^22.19.0 \|\| >=24.0.0` | 用的是内置 `node:crypto` 的 `randomUUID` |
+| DSH | `engines.dsh`: `>=0.2.2-0` | 0.2.2 起才有稳定的 `agent/status` + `agent.followup`；`-0` 只是为了让 `0.2.2-rc.1` 这类预发布也算满足（semver 规定：预发布版本只有在比较器 major.minor.patch 相同且自带预发布号时才匹配） |
+| Node | `>=22.19.0` | `node:crypto` 的 `randomUUID`，同时 DSH 桌面端自身要求 22.19+ |
 | cordis | peer `^4.1.0`，`optional: true` | 插件不 import cordis，它只是运行时容器；标 optional 免得装的时候报缺依赖 |
 | 包可见性 | 无 `private` 字段 | 有 `private` 的话 `npm i <github 仓库>` 会被拒 |
 
 版本对不上时不会静默失效，宿主日志里会出现明确一行：
 
 ```
-[refusal-guard] 宿主缺少 ctx.on / ctx.get，插件不会生效。dsh-refusal-guard 需要 DSH >= 0.2.0（cordis 4.x）。
+[refusal-guard] 宿主缺少 ctx.on / ctx.get，插件不会生效。dsh-refusal-guard 需要 DSH >= 0.2.2（cordis 4.x）。
 [refusal-guard] 宿主没有 agent.followup，无法补发指令（DSH 版本过旧），插件不会生效。
-[refusal-guard] 宿主没有 ctx.effect：热重载时监听可能残留，建议升级 DSH >= 0.2.0。
+[refusal-guard] 宿主没有 ctx.effect：热重载时监听可能残留，建议升级 DSH >= 0.2.2。
 ```
 
 ## 安装
