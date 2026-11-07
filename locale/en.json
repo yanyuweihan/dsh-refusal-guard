@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-refusal-guard",
+    "description": "Adds one execution follow-up when a short reply opens with a negation; real diagnoses and safety calls are left alone."
+  }
+}

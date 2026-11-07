@@ -1,0 +1,19 @@
+# dsh-refusal-guard bundle layer
+#
+# 挂载声明：DSH 启动时把这个条目插进 profile 的配置树。
+# 条目一旦进 Loader，左侧「插件」页面的 PluginInventoryGateway 就能读到它
+# （@deepseek-ai/dsh-host-plugin-inventory/lib/index.js:124 遍历 ctx.loader.entries()）。
+#
+# 注意：这里**不要**再写 retryText。config 会覆盖 lib/index.js 的 DEFAULTS，
+# 一旦两边不同步，代码里改好的补发文案就永远不会生效（v1.0.2 → v1.0.3 踩过）。
+- insert:
+    - id: dsh-refusal-guard
+      name: dsh-refusal-guard
+      config:
+        enabled: true
+        # 每回合最多自动补几次，防死循环
+        maxPerTurn: 2
+        # 超过这个长度的回复一律不判，避免误伤
+        maxChars: 220
+        # 等宿主彻底 idle 再补，避免和用户下一条消息竞态
+        delayMs: 280

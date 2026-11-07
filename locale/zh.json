@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-refusal-guard",
+    "description": "短回复以否定式开场时补一条执行轮；文件不存在、权限不足、安全判断这类正当结论不补。"
+  }
+}
