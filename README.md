@@ -63,6 +63,23 @@
 3. 因文件不存在、工具报错、权限受限、信息不足而停下 → 说明缺什么，**禁止编造**文件内容、
    命令输出、日志或运行状态，也禁止用 `[PLACEHOLDER]` 代替必要事实。
 
+## 与 dsh-purge 的关系
+
+**不依赖，但同源。** 两件事说清楚：
+
+- **起源**：这套「检测到拒绝就补一轮」最早写在 `dsh-purge` 的 `lib/continue-retry.js` 里试过。但那个文件只处理 turn/end 的 `error` / `aborted` / `interrupted` / `max-tokens`，**不看正常完成的文本** —— 而拒绝恰恰是一次"正常完成"，所以它拦不住，才有了这个独立插件。
+- **不依赖**：本插件不 import、不读取、也不要求 `dsh-purge`。装 purge、不装 purge、卸掉 purge，这里行为完全一致；两边的升级互不影响。
+
+**不碰 purge 的任何东西**（这是刻意划的线）：
+
+| 不碰 | 原因 |
+|---|---|
+| `prompt-inject.md` | 那文件由 purge 的加密槽重建，手改会被覆盖 —— 所以本插件**完全走生成后兜底**，不加任何提示词 |
+| `~/.dsh/dsh-purge/*`（`applied.json` / `drill-grant.json` / `hooks-deny.json`） | 那是 purge 的运行状态，读写都会互相干扰 |
+| 宿主 `app.asar` 里的官方代码 | purge 走的是 82 个补丁的路子，本插件只 `ctx.on` 监听事件 |
+
+**职责也不同**：purge 的 `hooks-deny` 管的是「工具调用被 hooks 拦下」，本插件管的是「模型回复本身短路」；一个在工具层，一个在文本层 —— 两者同时启用不会打架，顺序也无所谓。
+
 ## 配置（`cordis.patch.yml` 或插件页）
 
 | 键 | 默认 | 说明 |
